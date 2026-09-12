@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.5.0
+
+* Splugin: TLS fingerprint impersonation. A small Go bridge (utls via
+  tls-client) exposes 79 real browser/app TLS identities (Chrome 103-152,
+  Firefox 102-148, Safari 15-16, Edge, OkHttp, Brave, Opera, iOS/Android
+  profiles) driven from both SDKs over a newline-JSON pipe. Session cookie
+  jar persists across requests, so Splugin logins work too.
+* `fp=True` on any Splugin fetch asks tls.peet.ws what the server actually
+  saw and returns `.ja3`, `.ja4`, `.peetprint` on the result. Measured:
+  Chrome_131 profile = `t13d1516h2_8daaf6152771_...`, byte-identical to
+  curl_cffi's Chrome impersonation; python requests = `t13d3112h1_...`
+  (reads as a scraper). Full table in the README benchmarks section.
+* Splugin results satisfy `tplugin.Page` (compile-time asserted), so
+  screenshot/PDF/reader/Viewer/captcha-detection all work on them.
+* New MCP tools: `hjs_tls_fetch`, `hjs_tls_post`, `hjs_tls_profiles`,
+  `hjs_tls_session` (21 total; TLS tools only appear when the bridge is
+  present). Self-test now also checks a real Chrome JA4 round trip.
+* Engine: `--method`/`--body` now work for any verb (was POST-only via
+  POSTFIELDS; switched to COPYPOSTFIELDS so bodies are no longer read after
+  free). SDK `submit()`/`Post()` for forms and JSON logins.
+* `bench_splugin.py`: reproducible fingerprint matrix, cold/warm latency,
+  RSS, throughput and h2 checks. Raw output checked in at
+  `docs/bench-results.json`, chart at `docs/fingerprint-chart.svg`.
+
 ## 0.4.0
 
 * hjs-tplugin: a pure-stdlib rendering plugin for both SDKs. Hand-written PNG

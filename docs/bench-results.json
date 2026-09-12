@@ -1,0 +1,63 @@
+{
+  "generated": "2026-09-12 08:44:14",
+  "sections": {
+    "fingerprints": [
+      {
+        "tool": "hjs (libcurl/OpenSSL)",
+        "ja4": "t13d3112h2_e8f1e7e78f70_b26ce05bbdd6",
+        "ja3_hash": "0149f47eabf9",
+        "h": "h2"
+      },
+      {
+        "tool": "python requests (OpenSSL)",
+        "ja4": "t13d3112h1_e8f1e7e78f70_b26ce05bbdd6",
+        "ja3_hash": "0149f47eabf9",
+        "h": "HTTP/1.1"
+      },
+      {
+        "tool": "hjs Splugin [chrome_131]",
+        "ja4": "t13d1516h2_8daaf6152771_02713d6af862",
+        "ja3_hash": "a19ab9f02aac",
+        "h": "h2"
+      },
+      {
+        "tool": "hjs Splugin [firefox_133]",
+        "ja4": "t13d1714h2_5b57614c22b0_3dd24b5ebec4",
+        "ja3_hash": "a767f8ae9115",
+        "h": "h2"
+      },
+      {
+        "tool": "hjs Splugin [safari_16_0]",
+        "ja4": "t13d2014h2_a09f3c656075_14788d8d241b",
+        "ja3_hash": "773906b0efde",
+        "h": "h2"
+      },
+      {
+        "tool": "curl_cffi [chrome131]",
+        "ja4": "t13d1516h2_8daaf6152771_02713d6af862",
+        "ja3_hash": "2dee4808605c",
+        "alpn": null,
+        "h": "h2"
+      }
+    ],
+    "startup_mem": {
+      "hjs_one_shot_ms": 1156.8,
+      "hjs_peak_rss_mb": 20.8,
+      "sbridge_cold_one_shot_ms": 929.8,
+      "sbridge_warm_fetch_ms": 219.9,
+      "sbridge_warm_rss_mb": 17.2
+    },
+    "throughput": {
+      "w1": 55.7,
+      "w4": 187.0,
+      "w8": 247.5,
+      "w16": 57.1
+    },
+    "http": {
+      "sbridge_chrome_131": "h2 (ALPN h2,2.0)",
+      "curl_cffi_chrome131": 2,
+      "requests": "h1.1 (no ALPN h2)",
+      "splugin_chrome_alpn": "h2"
+    }
+  }
+}

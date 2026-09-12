@@ -28,8 +28,9 @@ still in pure stdlib and all still ~20 MB.
 | RAM per browser session | ~21 MB | ~300 MB | ~300 MB |
 | RAM for 8 parallel workers | ~118 MB | ~2400 MB (8 Chromium) | ~2400 MB |
 | Install size | 4 MB | ~170 MB (browser) + pip | ~15 MB + chromedriver |
-| Process start to first fetch | ~22 ms | ~1 s browser launch | ~1 s + driver handshake |
+| Process start to first fetch | ~22 ms warm pool / ~0.9 s cold one-shot (TLS+RTT dominated) | ~1 s browser launch | ~1 s + driver handshake |
 | Runs JavaScript | Yes (QuickJS, ES2020) | Yes (V8, full DOM) | Yes (V8, full DOM) |
+| JA3/JA4 TLS fingerprint | `Splugin` plugin: real Chrome/Firefox/Safari | real (it is Chrome) | real (it is Chrome) |
 | PDF export | Built in (`hjs-tplugin`) | Yes | Yes |
 | PNG screenshot | Content snapshot (no layout) | Full pixel render | Full pixel render |
 | Scroll / tap links | Built in (line hit-test) | Yes (pixels) | Yes (pixels) |
@@ -70,31 +71,88 @@ sits idle waiting on the network.
 
 ## Benchmarks
 
-All numbers below are measured on this project (6-core WSL2 box, local test
-server so the network is not the bottleneck; `scrape(...)` warms first, then
-runs 24x per worker).
+Everything measured live on this repo (6-core WSL2, Ubuntu 24.04), with the
+full raw data checked in at [docs/bench-results.json](docs/bench-results.json)
+and the generator at `sdk-python/bench_splugin.py`, so every number below can
+be reproduced or argued with.
+
+### Memory and throughput (hjs, local test server, warm)
 
 ![hjs scaling](docs/scaling-chart.svg)
 
-| workers | peak RAM | fetches/s (local) |
+| hjs workers | peak RAM | fetches/s (local) |
 |---|---|---|
-| 1 | 19 MB | ~51 |
-| 2 | 37 MB | ~101 |
-| 4 | 66 MB | ~168 |
-| 8 | 118 MB | ~205 |
-| 16 | 254 MB | ~164 (subprocess contention on 6 cores) |
+| 1 | 19 MB | ~55 |
+| 4 | 66 MB | ~187 |
+| 8 | 118 MB | ~247 |
+| 16 | 254 MB | ~57 (subprocess contention on 6 cores) |
+
+A single hjs fetch peaks at ~21 MB RSS. Compare: one headless Chromium is
+~300 MB. Fifty parallel Chromium contexts is not a configuration people run;
+fifty hjs workers is ~1 GB. That gap is the whole argument for using this
+instead, and it is a memory argument first and a CPU argument second.
+
+### One-shot and warm cost (hjs vs Splugin, same machine)
+
+| what | median ms | peak RSS |
+|---|---|---|
+| hjs, fresh process + fetch (cold) | ~900 | 21 MB |
+| Splugin, fresh bridge + 1 fetch (cold) | ~930 | 17 MB |
+| Splugin, warm bridge, each extra fetch | ~220 | 17 MB total |
+
+Cold start parity is expected: both processes spawn fast, the ~900 ms is mostly
+TLS+RTT to a public host. The interesting row is the last one: reuse one
+long-lived bridge and Splugin gives browser-grade TLS at 220 ms/fetch on a live
+site, and 17 MB total no matter how many profiles you rotate through. hjs's own
+process-pool model amortizes the same way across workers.
+
+### TLS fingerprints (JA4) as a server sees them
+
+Measured by asking tls.peet.ws to echo back the real handshake of each tool on
+this box. A JA4 starting `t13d1516h2_8daaf6152771` is what Chrome sends.
+
+| client | JA4 seen by server | verdict |
+|---|---|---|
+| hjs (libcurl/OpenSSL) | `t13d3112h2_e8f1e7e78f70` | reads as a scraper |
+| python requests (OpenSSL) | `t13d3112h1_e8f1e7e78f70` | reads as a scraper |
+| **hjs Splugin** `chrome_131` | `t13d1516h2_8daaf6152771` | **identical to Chrome** |
+| **hjs Splugin** `firefox_133` | `t13d1714h2_5b57614c22b0` | Firefox |
+| **hjs Splugin** `safari_16_0` | `t13d2014h2_a09f3c656075` | Safari |
+| curl_cffi `chrome131` (reference) | `t13d1516h2_8daaf6152771` | matches the same Chrome |
+
+Splugin's Chrome JA4 is byte-identical to curl_cffi's impersonation of Chrome,
+and curl_cffi is the library the Python scraping world trusts for this. The
+difference is Splugin ships it inside the hjs stack: same SDK call style, same
+cookie jar, and the result flows straight into the tplugin screenshot/pdf/touch
+tools, which curl_cffi has no answer for.
+
+### HTTP/2
+
+hjs and Splugin both negotiate `h2` against ALPN-capable hosts; plain
+`requests` falls to HTTP/1.1. Real browsers speak h2, so an h1.1-only client is
+a weak but real fingerprint signal. (hjs: h2 via libcurl. Splugin: h2,
+ALPN `h2,http/1.1` exactly as Chrome advertises.)
 
 Notes, stated plainly so the numbers are not misread:
 
-* 51 fetches/s single worker is against a localhost test server. Real internet
-  work is bound by the remote host and RTT, so throughput there is set by how
-  politely you crawl, not by hjs. A 1-second-per-host delay means 1 host/s no
-  matter what the tool is.
-* The honest ceiling is memory. To run 500 Chromium tabs you need ~150 GB; the
-  same 500 hjs workers need ~10 GB. That gap is the whole argument.
-* A single hjs process is ~22 ms to start and fetch, which is why the process
-  per request model here is cheap. Playwright amortizes browser startup across
-  a long-lived context, which is the right call when you need a real DOM.
+* The 55-250 fetches/s range is a localhost test server. Real scraping is
+  bound by remote hosts and RTT, so being polite (per-host delay, retries)
+  matters more than these CPU numbers. They say: hjs is never the bottleneck.
+* The 20 MB single-fetch RSS is measured with `/usr/bin/time -v`, not estimated.
+* Playwright/Selenium figures are their documented ranges for headless Chrome;
+  the CDN was too slow on this box to install Chromium and measure a live
+  side-by-side, so those cells are marked as ranges, not measurements.
+* A single hjs process is fast to spawn but each fetch pays the TLS cost; the
+  model is a pool of short-lived processes, not a browser you keep open. That
+  is the whole design trade: cheap to start, ~20 MB each, no persistent DOM.
+
+### How to reproduce
+
+```sh
+cd sdk-python
+HJS_BIN=/usr/local/bin/hjs HJS_SPLUGIN=/path/to/sbridge \
+  python3 bench_splugin.py > docs/bench-results.json
+```
 
 ## Install
 
@@ -104,6 +162,8 @@ The binary is a Linux x86-64 ELF (WSL on Windows is fine). Three files:
 hjs                   the binary (~160 KB)
 libhjs.so             QuickJS engine + C shim (3.8 MB)
 browser_profiles.txt  fingerprint profiles, edit freely
+sbridge               Splugin TLS bridge (~16 MB; only needed for JA3/JA4
+                      impersonation, point $HJS_SPLUGIN at it or put it on PATH)
 ```
 
 ```sh
@@ -234,6 +294,48 @@ highlighted, good enough to eyeball a page or attach to a report. If you need
 the exact pixels Chrome paints, that is the one job Playwright is built for and
 this does not fake it.
 
+### Splugin: real browser TLS fingerprints (JA3/JA4)
+
+The one thing a browser gives a scraper that libcurl cannot: the TLS handshake.
+TLS-terminating anti-bot systems read the ClientHello (cipher order, extension
+order, GREASE, ALPN, curves) and hash it into JA3/JA4. OpenSSL always looks
+like OpenSSL, no matter what headers you put on top.
+
+Splugin fixes exactly that. It is a companion plugin: a small Go bridge process
+built on `bogdanfinn/tls-client` (a maintained fork of utls, the same
+impersonation tech curl-impersonate and curl_cffi use) that exposes 79 real
+browser and app TLS identities. The Python and Go SDKs talk to it over stdin
+with newline JSON, keep a cookie jar across requests, and the results plug
+straight into everything else in this repo (tplugin screenshot/pdf/Viewer,
+captcha detection, structured extraction).
+
+```python
+from hjs_splugin import Session
+import hjs_tplugin as t
+
+s = Session(profile="chrome_131")            # 79 profiles in s.profiles()
+r = s.fetch("https://protected-site.example", fp=True)
+print(r.status, r.title, r.ja4)              # t13d1516h2... = real Chrome JA4
+open("shot.png", "wb").write(t.screenshot(r))
+```
+
+```go
+s, _ := splugin.New(splugin.Options{Profile: "chrome_131"})
+defer s.Close()
+r, _ := s.Fetch("https://protected-site.example", splugin.FetchOpts{FP: true})
+fmt.Println(r.Status, r.JA4)
+```
+
+`fp=True` is a nice debugging trick: the fetch also asks tls.peet.ws what the
+server actually saw, and returns `.ja3`, `.ja4`, `.peetprint` on the result, so
+you can prove your fingerprint is clean without leaving your REPL.
+
+When to use which: hjs for volume scraping (lowest overhead), Splugin when a
+specific site gates on TLS. Both share the same result shape, so a pipeline can
+start on hjs and fall back to Splugin on the exact URLs that return 403s.
+
+![JA4 fingerprints measured live](docs/fingerprint-chart.svg)
+
 ### Fingerprint rotation
 
 ```python
@@ -260,7 +362,9 @@ pages = b.scrape(urls, workers=8)   # 8 in flight, max 1 req/1.5s per host
   Netscape-format sessions across runs. The SDK keeps a session jar per Browser.
 * **Referer chaining**: every `goto` inside a session sends the previous page as
   the Referer, like clicking through a site.
-* **TLS**: HTTP/2 with fallback, TLS floor 1.2 or 1.3, custom cipher lists.
+* **TLS**: HTTP/2 with fallback, TLS floor 1.2 or 1.3, custom cipher lists, and,
+  with the Splugin plugin, genuine browser TLS handshakes (JA3/JA4). See the
+  fingerprint benchmark above.
 * **Proxy**: any curl proxy URL (`socks5://`, `http://`) via `--proxy=`.
 * **Rate limiting**: `--delay-ms` per request, `per_host_delay_ms` for the pool,
   `--retries` + linear `--backoff-ms` on 429/5xx/timeouts.
@@ -273,11 +377,14 @@ pages = b.scrape(urls, workers=8)   # 8 in flight, max 1 req/1.5s per host
 
 ### Honest limits
 
-The TLS handshake is OpenSSL. HTTP-level headers are browser-shaped, but a
-JA3/JA4 fingerprint will not match real Chrome. Sites that gate on TLS
-fingerprints (a minority of anti-bot vendors) need curl-impersonate or a real
-browser. If you get `blocked: cloudflare` back and retries with fresh cookies do
-not clear it, that is the signal to escalate the tool, not to add headers.
+Core hjs speaks OpenSSL TLS: HTTP-level headers are browser-shaped, but the
+JA3/JA4 fingerprint will not match real Chrome on its own. That is exactly the
+gap the Splugin plugin closes (see the measured JA4 table), so a site that
+blocks hjs on TLS can be handled from the same pipeline by swapping the fetch
+call, not the whole stack. Even with Splugin: if you get `blocked: cloudflare`
+back and retries with fresh cookies do not clear it, the vendor is doing
+browser-attestation beyond fingerprints (JS challenges, TLS timing, HTTP
+fingerprinting); that needs a real browser or a solver service.
 
 External `<script src>` files are not fetched, only inline scripts run. Pages
 that build their whole DOM with React/Vue and never set body text still extract
@@ -294,20 +401,26 @@ Claude Desktop or ZCode:
     "hjs": {
       "command": "python3",
       "args": ["/opt/hjs/mcp_server.py"],
-      "env": {"HJS_BIN": "/usr/local/bin/hjs"}
+      "env": {
+        "HJS_BIN": "/usr/local/bin/hjs",
+        "HJS_SPLUGIN": "/opt/hjs/sbridge"
+      }
     }
   }
 }
 ```
 
-17 tools: `hjs_goto`, `hjs_submit`, `hjs_extract`, `hjs_html`, `hjs_links`,
+21 tools (the four TLS ones only appear when the Splugin bridge is found):
+`hjs_goto`, `hjs_submit`, `hjs_extract`, `hjs_html`, `hjs_links`,
 `hjs_click_link`, `hjs_tap`, `hjs_scroll`, `hjs_screenshot`, `hjs_pdf`,
 `hjs_print`, `hjs_reader`, `hjs_wait_for`, `hjs_scrape`, `hjs_sitemap`,
-`hjs_robots`, `hjs_session`. An agent gets text plus numbered links, can click
-or tap through a site, take a snapshot or PDF, and one session (cookies plus
+`hjs_robots`, `hjs_session`, plus Splugin's `hjs_tls_fetch`, `hjs_tls_post`,
+`hjs_tls_profiles`, `hjs_tls_session`. An agent gets text plus numbered links,
+can click or tap through a site, take a snapshot or PDF, fetch through a real
+browser TLS handshake when the target is picky, and one session (cookies plus
 referer chain) is preserved across calls. `python3 mcp_server.py --self-test`
-drives the whole protocol end to end and checks a real screenshot and PDF land
-on disk.
+drives the whole protocol end to end and checks a real screenshot, a real PDF,
+and a real Chrome JA4 all come back.
 
 ## CLI
 
@@ -325,13 +438,21 @@ Exit codes: 0 ok, 1 usage error, 2 network error, 3 HTTP error status.
 ## Repo layout
 
 ```
-binary/            prebuilt hjs + libhjs.so + browser_profiles.txt
+binary/            prebuilt hjs + libhjs.so + browser_profiles.txt + sbridge
 engine/            hjs.mojo, hjs_shim.c, build-from-source guide
-sdk-python/        hjs.py, hjs_tplugin.py, mcp_server.py, tests, examples
-sdk-go/            hjs.go module, tplugin/ package, tests
+sdk-python/        hjs.py, hjs_tplugin.py, hjs_splugin.py, mcp_server.py,
+                   bench_splugin.py, tests, examples
+sdk-go/            hjs.go module, tplugin/ package, splugin/ package + bridge,
+                   tests
 sibling-hbrowser/  hbrowser.mojo, the no-JS 120 KB variant
-docs/              memory + scaling charts, feature and deployment guides
+docs/              memory/scaling/fingerprint charts, bench-results.json,
+                   feature and deployment guides
 ```
+
+The Splugin bridge (`sdk-go/splugin/bridge`) is the only piece with a third-party
+dependency (utls via `github.com/bogdanfinn/tls-client`); it builds with a plain
+`go build -o sbridge .` and stays a separate small process, so the hjs core and
+tplugin remain dependency-free.
 
 ## Building from source
 
@@ -349,14 +470,19 @@ MODULAR_MOJO_MAX_SYSTEM_LIBS=/usr/lib/x86_64-linux-gnu/libcurl.so.4 \
 
 ## Tests
 
-Everything is deterministic against a local test server, no live network needed
-after the binary exists:
+The SDK suites are deterministic against a local test server, no live network
+needed once the binary exists. The Splugin suites do reach tls.peet.ws (that is
+the point, a server has to report what it saw) and the fingerprint benchmark
+likewise.
 
 ```sh
 cd sdk-python && HJS_BIN=/usr/local/bin/hjs python3 test_hjs_sdk.py   # 42 checks
 cd sdk-python && python3 test_tplugin.py                              # 23 checks
-cd sdk-go     && HJS_BIN=/usr/local/bin/hjs go test ./...              # 17 + tplugin
-python3 sdk-python/mcp_server.py --self-test                           # MCP protocol, 17 tools
+cd sdk-python && HJS_SPLUGIN=/path/to/sbridge python3 test_splugin.py # 22 checks
+cd sdk-go     && HJS_BIN=/usr/local/bin/hjs go test ./...             # core + tplugin
+cd sdk-go     && HJS_SPLUGIN=/path/to/sbridge go test ./splugin       # Splugin client
+python3 sdk-python/mcp_server.py --self-test                          # MCP, 21 tools
+python3 sdk-python/bench_splugin.py                                   # rebuild docs/bench-results.json
 ```
 
 ## License

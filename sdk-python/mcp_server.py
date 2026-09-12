@@ -46,9 +46,16 @@ except Exception:
     tp = None
     _HAVE_TPLUGIN = False
 
+try:
+    import hjs_splugin as sp  # optional: adds JA3/JA4 TLS-impersonation tools
+    _HAVE_SPLUGIN = True
+except Exception:
+    sp = None
+    _HAVE_SPLUGIN = False
+
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "hjs"
-SERVER_VERSION = "0.3.0"
+SERVER_VERSION = "0.5.0"
 
 
 def _profile() -> str:
@@ -309,6 +316,77 @@ def tool_defs() -> list[dict]:
     ]
 
 
+TLS_TOOLS = [
+    {
+        "name": "hjs_tls_fetch",
+        "description": ("Fetch a URL through Splugin: a real Chrome/Firefox/"
+                        "Safari TLS handshake (browser JA3/JA4 via utls, the "
+                        "part libcurl/OpenSSL cannot do). fp=true reads the "
+                        "fingerprint back from tls.peet.ws. profile picks the "
+                        "identity (chrome_131, firefox_133, safari_16_0, ...); "
+                        "cookies persist across calls."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "profile": {"type": "string"},
+                "fp": {"type": "boolean"},
+                "timeout": {"type": "number"},
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "hjs_tls_post",
+        "description": "POST a form or JSON body via Splugin (browser TLS).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "data": {"type": "object"},
+                "json": {"type": "object"},
+                "profile": {"type": "string"},
+                "fp": {"type": "boolean"},
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "hjs_tls_profiles",
+        "description": "List every Splugin TLS profile (browser/app identities).",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "hjs_tls_session",
+        "description": "Cookies held by the Splugin TLS session.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+]
+
+
+_TPLUGIN_TOOL_NAMES = {"hjs_screenshot", "hjs_pdf", "hjs_print", "hjs_reader",
+                       "hjs_scroll", "hjs_tap"}
+
+
+def _tool_list() -> list[dict]:
+    tools = [t for t in tool_defs()
+             if _HAVE_TPLUGIN or t["name"] not in _TPLUGIN_TOOL_NAMES]
+    if _HAVE_SPLUGIN:
+        tools = tools + TLS_TOOLS
+    return tools
+
+
+TLS_SESSION = None
+
+
+def _tls():
+    global TLS_SESSION
+    if TLS_SESSION is None:
+        TLS_SESSION = sp.Session(profile=os.environ.get("HJS_SPLUGIN_PROFILE",
+                                                        "chrome_131"))
+    return TLS_SESSION
+
+
 SESSION = Session()
 
 
@@ -447,11 +525,55 @@ def call_tool(name: str, args: dict) -> str:
                 f"cookies_in_jar={n_cookies}")
 
     # -- tplugin-backed tools (need the rendering plugin) --------------------
-    if _HAVE_TPLUGIN and name in ("hjs_screenshot", "hjs_pdf", "hjs_print",
-                                  "hjs_reader", "hjs_scroll", "hjs_tap"):
+    if _HAVE_TPLUGIN and name in _TPLUGIN_TOOL_NAMES:
         return _call_tplugin(name, args)
 
+    # -- splugin-backed tools (need the TLS bridge) --------------------------
+    if _HAVE_SPLUGIN and name in ("hjs_tls_fetch", "hjs_tls_post",
+                                  "hjs_tls_profiles", "hjs_tls_session"):
+        return _call_splugin(name, args)
+
     raise ValueError(f"unknown tool: {name}")
+
+
+def _fmt_tls(r) -> str:
+    lines = [f"status: {r.status}  elapsed: {r.elapsed_ms}ms"]
+    if r.captcha:
+        lines.append(f"CAPTCHA DETECTED: {r.captcha}")
+    lines.append(f"title: {r.title}")
+    if r.ja4:
+        lines.append(f"ja4:       {r.ja4}")
+        lines.append(f"ja3_hash:  {r.ja3_hash}")
+        lines.append(f"peetprint: {(r.peetprint or '')[:80]}")
+        lines.append(f"server saw alpn/h2: {r.http_version}")
+    text = r.text
+    if len(text) > 4000:
+        text = text[:4000] + f"\n... [{r.bytes} bytes total]"
+    lines.append("text:\n" + text)
+    return "\n".join(lines)
+
+
+def _call_splugin(name: str, args: dict) -> str:
+    try:
+        sess = _tls()
+    except Exception as e:  # bridge missing at runtime
+        return f"error: splugin bridge unavailable: {e}"
+    if name == "hjs_tls_fetch":
+        r = sess.fetch(args["url"], profile=args.get("profile"),
+                       fp=bool(args.get("fp")),
+                       timeout=args.get("timeout"))
+        return _fmt_tls(r)
+    if name == "hjs_tls_post":
+        r = sess.post(args["url"], data=args.get("data"),
+                      json_body=args.get("json"), profile=args.get("profile"),
+                      fp=bool(args.get("fp")))
+        return _fmt_tls(r)
+    if name == "hjs_tls_profiles":
+        return "\n".join(sess.profiles())
+    if name == "hjs_tls_session":
+        cs = sess.cookies()
+        return json.dumps(cs, ensure_ascii=False, indent=2)
+    raise ValueError(f"unknown splugin tool: {name}")
 
 
 def _resolve_page(args: dict):
@@ -542,7 +664,7 @@ def handle(req: dict) -> dict | None:
     if method == "ping":
         return {"jsonrpc": "2.0", "id": rid, "result": {}}
     if method == "tools/list":
-        return {"jsonrpc": "2.0", "id": rid, "result": {"tools": tool_defs()}}
+        return {"jsonrpc": "2.0", "id": rid, "result": {"tools": _tool_list()}}
     if method == "tools/call":
         params = req.get("params", {})
         name = params.get("name", "")
@@ -591,13 +713,17 @@ def self_test() -> int:
             "name": "hjs_screenshot", "arguments": {"path": "/tmp/_hjs_selftest.png"}}},
         {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {
             "name": "hjs_pdf", "arguments": {"path": "/tmp/_hjs_selftest.pdf"}}},
+        {"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {
+            "name": "hjs_tls_fetch", "arguments": {
+                "url": "https://example.com", "profile": "chrome_131",
+                "fp": True}}},
     ]
     stdin = "\n".join(json.dumps(c) for c in cases) + "\n"
     proc = subprocess.run([sys.executable, __file__], input=stdin,
-                          capture_output=True, text=True, timeout=120)
+                          capture_output=True, text=True, timeout=180)
     ok = True
-    n_expected = len(tool_defs())
-    seen_pdf = seen_png = False
+    n_expected = len(_tool_list())
+    seen_pdf = seen_png = seen_ja4 = False
     for line in proc.stdout.splitlines():
         msg = json.loads(line)
         if msg.get("id") == 2:
@@ -620,6 +746,12 @@ def self_test() -> int:
             seen_pdf = os.path.exists("/tmp/_hjs_selftest.pdf")
             print("hjs_pdf ->", "wrote file" if seen_pdf else "MISSING")
             ok = ok and seen_pdf
+        if msg.get("id") == 8:
+            text = msg["result"]["content"][0]["text"]
+            first = text.splitlines()[0] if text else "EMPTY"
+            seen_ja4 = "t13d1516h2" in text
+            print("hjs_tls_fetch ->", first, "| ja4 seen:", seen_ja4)
+            ok = ok and ("status: 200" in text) and seen_ja4
     print("SELF-TEST", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 
