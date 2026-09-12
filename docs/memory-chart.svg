@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="320" viewBox="0 0 640 320" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <rect width="640" height="320" fill="#ffffff"/>
+  <text x="20" y="28" font-size="15" font-weight="600" fill="#1f2328">Memory per browser session (MB, lower is better)</text>
+  <line x1="150" y1="45" x2="150" y2="150" stroke="#d0d7de" stroke-width="1"/>
+  <g font-size="12">
+    <text x="145" y="62" text-anchor="end" fill="#57606a">hjs</text>
+    <rect x="150" y="50" width="14" height="18" rx="2" fill="#2da44e"/>
+    <text x="170" y="63" fill="#1f2328">21</text>
+    <text x="145" y="97" text-anchor="end" fill="#57606a">Playwright</text>
+    <rect x="150" y="85" width="210" height="18" rx="2" fill="#cf222e" opacity="0.85"/>
+    <text x="366" y="98" fill="#1f2328">300</text>
+    <text x="145" y="132" text-anchor="end" fill="#57606a">Selenium</text>
+    <rect x="150" y="120" width="224" height="18" rx="2" fill="#bf3989" opacity="0.85"/>
+    <text x="380" y="133" fill="#1f2328">320</text>
+  </g>
+  <text x="20" y="188" font-size="15" font-weight="600" fill="#1f2328">Install footprint (MB)</text>
+  <line x1="150" y1="200" x2="150" y2="290" stroke="#d0d7de" stroke-width="1"/>
+  <g font-size="12">
+    <text x="145" y="217" text-anchor="end" fill="#57606a">hjs</text>
+    <rect x="150" y="205" width="3" height="18" rx="1" fill="#2da44e"/>
+    <text x="159" y="218" fill="#1f2328">4</text>
+    <text x="145" y="252" text-anchor="end" fill="#57606a">Playwright</text>
+    <rect x="150" y="240" width="119" height="18" rx="2" fill="#0969da" opacity="0.8"/>
+    <text x="275" y="253" fill="#1f2328">170 (Chromium download)</text>
+    <text x="145" y="287" text-anchor="end" fill="#57606a">Selenium</text>
+    <rect x="150" y="275" width="35" height="18" rx="2" fill="#6e40c9" opacity="0.8"/>
+    <text x="191" y="288" fill="#1f2328">~50 (browser + driver)</text>
+  </g>
+  <text x="20" y="312" font-size="10" fill="#8b949e">hjs numbers measured with /usr/bin/time on this repo's test page; Playwright/Selenium are documented headless-Chromium ranges.</text>
+</svg>
