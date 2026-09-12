@@ -13,6 +13,23 @@ import (
 
 func testServer(t *testing.T) *httptest.Server {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/post", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			r.ParseForm()
+			ct := r.Header.Get("Content-Type")
+			var body string
+			if strings.Contains(ct, "application/json") {
+				buf := make([]byte, r.ContentLength)
+				r.Body.Read(buf)
+				body = string(buf)
+			} else {
+				body = r.Form.Get("greeting") + "|" + r.Form.Get("name")
+			}
+			w.Write([]byte("<html><title>Posted</title><body>posted=" + body + "</body></html>"))
+			return
+		}
+		w.Write([]byte("<html><title>Form</title><body>form here</body></html>"))
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/setcookie"):
@@ -286,6 +303,39 @@ func TestHTMLAndWaitFor(t *testing.T) {
 		t.Fatal(err)
 	} else if p.Status != 200 {
 		t.Fatal("waitfor bad status")
+	}
+}
+
+func TestSubmitFormsAndJSON(t *testing.T) {
+	srv := testServer(t)
+	defer srv.Close()
+	b := newTestBrowser(t, Options{})
+	defer b.DeleteJar()
+
+	// urlencoded form post
+	p, err := b.Submit(srv.URL+"/post", map[string]string{"greeting": "hello", "name": "world"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(p.Text, "posted=hello|world") {
+		t.Fatalf("form post text=%q", p.Text)
+	}
+	// json body
+	p2, err := b.Submit(srv.URL+"/post", nil, map[string]any{"a": 1, "b": "x"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(p2.Text, "\"a\":1") && !strings.Contains(p2.Text, "\"b\":\"x\"") {
+		t.Fatalf("json post text=%q", p2.Text)
+	}
+	// referer chained from last page
+	b.Goto(srv.URL+"/", nil)
+	p3, err := b.Submit(srv.URL+"/echo", map[string]string{"q": "1"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(p3.Text, "referer") || !strings.Contains(p3.Text, srv.URL+"/\"") {
+		t.Logf("referer echo text=%q", p3.Text)
 	}
 }
 

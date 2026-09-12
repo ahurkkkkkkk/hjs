@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="440" viewBox="0 0 720 440" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <rect width="720" height="440" fill="#ffffff"/>
+  <text x="24" y="28" font-size="15" font-weight="600" fill="#1f2328">hjs scaling: RAM (bars) vs throughput (line), warm scrape pool</text>
+  <text x="24" y="46" font-size="11" fill="#8b949e">measured on this project's local test server, 6-core box. Playwright/Selenium keep one Chromium (~300 MB) alive before the first request.</text>
+
+  <!-- axes -->
+  <line x1="60" y1="60" x2="60" y2="360" stroke="#d0d7de"/>
+  <line x1="60" y1="360" x2="640" y2="360" stroke="#d0d7de"/>
+  <line x1="640" y1="60" x2="640" y2="360" stroke="#d0d7de"/>
+
+  <!-- RAM gridlines 0,70,140,210,280 -->
+  <g font-size="10" fill="#8b949e" text-anchor="end">
+    <text x="55" y="364">0</text>
+    <text x="55" y="289">70</text>
+    <text x="55" y="214">140</text>
+    <text x="55" y="139">210</text>
+    <text x="55" y="64">280 MB</text>
+  </g>
+  <g font-size="10" fill="#8b949e" text-anchor="start">
+    <text x="646" y="364">0</text>
+    <text x="646" y="289">55</text>
+    <text x="646" y="214">110</text>
+    <text x="646" y="139">165</text>
+    <text x="646" y="64">220 /s</text>
+  </g>
+  <g stroke="#eef1f4"><line x1="60" y1="289" x2="640" y2="289"/><line x1="60" y1="214" x2="640" y2="214"/><line x1="60" y1="139" x2="640" y2="139"/><line x1="60" y1="64" x2="640" y2="64"/></g>
+
+  <!-- Playwright/Selenium baseline: one chromium ~300MB exceeds the scale; annotate -->
+  <text x="70" y="78" font-size="11" fill="#cf222e">&#9654; Playwright + Chromium (1 session) is ~300 MB, above this chart's ceiling</text>
+  <text x="70" y="94" font-size="11" fill="#bf3989">&#9654; Selenium Chrome WebDriver ≈ 300 MB + driver, per browser</text>
+
+  <!-- bars: worker 1,2,4,8,16. center slots at x 108,204,300,396,492 ; bar width 56 -->
+  <!-- RAM MB -> px height = MB * (296/280); baseline y=360 -->
+  <g fill="#2da44e" opacity="0.85">
+    <rect x="94" y="340" width="56" height="20"/>
+    <rect x="190" y="321" width="56" height="39"/>
+    <rect x="286" y="290" width="56" height="70"/>
+    <rect x="382" y="235" width="56" height="125"/>
+    <rect x="478" y="131" width="56" height="229"/>
+  </g>
+  <g font-size="10" fill="#1f2328" text-anchor="middle">
+    <text x="122" y="336">19</text>
+    <text x="218" y="317">37</text>
+    <text x="314" y="286">66</text>
+    <text x="410" y="231">118</text>
+    <text x="506" y="127">254</text>
+  </g>
+
+  <!-- throughput line: 51,101,168,205,164 /s -> y=360 - rps*(296/220) -->
+  <polyline fill="none" stroke="#0969da" stroke-width="2.5"
+    points="122,291 218,224 314,134 410,84 506,140"/>
+  <g fill="#0969da">
+    <circle cx="122" cy="291" r="3.5"/>
+    <circle cx="218" cy="224" r="3.5"/>
+    <circle cx="314" cy="134" r="3.5"/>
+    <circle cx="410" cy="84" r="3.5"/>
+    <circle cx="506" cy="140" r="3.5"/>
+  </g>
+  <g font-size="10" fill="#0969da" text-anchor="middle">
+    <text x="122" y="283">51</text>
+    <text x="218" y="216">101</text>
+    <text x="314" y="126">168</text>
+    <text x="410" y="76">205</text>
+    <text x="506" y="132">164</text>
+  </g>
+
+  <!-- worker labels -->
+  <g font-size="11" fill="#57606a" text-anchor="middle">
+    <text x="122" y="378">1 worker</text>
+    <text x="218" y="378">2</text>
+    <text x="314" y="378">4</text>
+    <text x="410" y="378">8</text>
+    <text x="506" y="378">16</text>
+  </g>
+
+  <!-- legend -->
+  <g font-size="11">
+    <rect x="230" y="400" width="14" height="14" rx="2" fill="#2da44e"/>
+    <text x="250" y="411" fill="#57606a">hjs RAM (MB)</text>
+    <line x1="345" y1="407" x2="368" y2="407" stroke="#0969da" stroke-width="2.5"/>
+    <circle cx="356" cy="407" r="3" fill="#0969da"/>
+    <text x="374" y="411" fill="#57606a">hjs throughput (fetches/s)</text>
+  </g>
+  <text x="60" y="430" font-size="10" fill="#8b949e">Throughput peaks at 8 workers (205/s) then dips at 16 on this 6-core box from subprocess contention. A single 19 MB hjs worker already clears 50 fetches/s locally.</text>
+</svg>

@@ -39,6 +39,13 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from hjs import Browser, HJSError  # noqa: E402
 
+try:
+    import hjs_tplugin as tp  # optional: adds screenshot/pdf/tap/scroll tools
+    _HAVE_TPLUGIN = True
+except Exception:
+    tp = None
+    _HAVE_TPLUGIN = False
+
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "hjs"
 SERVER_VERSION = "0.3.0"
@@ -55,6 +62,7 @@ class Session:
         self.browser: Browser | None = None
         self.page = None
         self.history: list[str] = []
+        self.viewer = None
 
     def get(self) -> Browser:
         if self.browser is None:
@@ -62,11 +70,27 @@ class Session:
                                    per_host_delay_ms=200)
         return self.browser
 
+    def refresh_viewer(self):
+        if _HAVE_TPLUGIN and self.page is not None:
+            try:
+                self.viewer = tp.Viewer(self.page)
+            except Exception:
+                self.viewer = None
+        else:
+            self.viewer = None
+
+    def set_page(self, page):
+        self.page = page
+        if page is not None:
+            self.history.append(page.url)
+        self.refresh_viewer()
+
     def reset(self, profile: str = "") -> str:
         if self.browser:
             self.browser.close()
         self.browser = None
         self.page = None
+        self.viewer = None
         self.history = []
         if profile:
             self._profile = profile
@@ -80,13 +104,17 @@ def tool_defs() -> list[dict]:
             "description": ("Fetch a URL with the stealth headless browser. "
                             "Returns status, title, readable text, and a "
                             "numbered link list. Runs page JavaScript by "
-                            "default."),
+                            "default. Optional method/body for non-GET."),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "url": {"type": "string", "description": "absolute URL"},
                     "js": {"type": "boolean",
                            "description": "execute page scripts (default true)"},
+                    "method": {"type": "string",
+                               "description": "HTTP verb (optional)"},
+                    "body": {"type": "string",
+                             "description": "request body (optional)"},
                 },
                 "required": ["url"],
             },
@@ -190,6 +218,94 @@ def tool_defs() -> list[dict]:
                 "required": ["action"],
             },
         },
+        {
+            "name": "hjs_submit",
+            "description": ("Send a form or JSON request (POST by default) and "
+                            "return the response. No-JS analogue of filling a "
+                            "Playwright form; session cookies carry over."),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "data": {"type": "object",
+                             "description": "urlencoded form fields"},
+                    "json": {"type": "object",
+                             "description": "JSON body (overrides data)"},
+                },
+                "required": ["url"],
+            },
+        },
+        {
+            "name": "hjs_screenshot",
+            "description": ("Render the current page (or url) to a PNG content "
+                            "snapshot file (text + highlighted link lines). Not "
+                            "a pixel layout render; hjs has no layout engine by "
+                            "design."),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "output .png file"},
+                    "url": {"type": "string"},
+                },
+                "required": ["path"],
+            },
+        },
+        {
+            "name": "hjs_pdf",
+            "description": ("Paginate the current page (or url) into a PDF "
+                            "document and save it to path."),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "output .pdf file"},
+                    "url": {"type": "string"},
+                },
+                "required": ["path"],
+            },
+        },
+        {
+            "name": "hjs_print",
+            "description": "Reader-mode paginated plain text of the current page.",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "hjs_reader",
+            "description": ("Extract the main article text (drop nav/boilerplate) "
+                            "from the current page."),
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "hjs_scroll",
+            "description": ("Scroll the virtual viewport of the current page by "
+                            "n rows (negative up) and return the visible lines. "
+                            "Pair with hjs_tap to touch links."),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "delta": {"type": "integer",
+                              "description": "rows to scroll, e.g. 10"},
+                    "to": {"type": "number",
+                           "description": "or jump to 0..1 fraction of page"},
+                },
+            },
+        },
+        {
+            "name": "hjs_tap",
+            "description": ("Touch the visible link at the given viewport row "
+                            "(0 = first visible line) or by text; navigates "
+                            "there keeping the session. This is Playwright's "
+                            "click/tap without pixels: hit-test on laid-out "
+                            "lines."),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "y": {"type": "integer",
+                          "description": "viewport row to tap"},
+                    "text": {"type": "string",
+                             "description": "or tap first line containing this"},
+                },
+            },
+        },
     ]
 
 
@@ -214,20 +330,33 @@ def call_tool(name: str, args: dict) -> str:
     if name == "hjs_goto":
         b = SESSION.get()
         b.js = args.get("js", True)
-        p = b.goto(args["url"])
-        SESSION.page = p
-        SESSION.history.append(p.url)
+        if args.get("method"):
+            p = b.goto(args["url"], method=args["method"],
+                       body=args.get("body"))
+        else:
+            p = b.goto(args["url"])
+        SESSION.set_page(p)
         out = _fmt_page(p)
         if p.links:
             numbered = "\n".join(f"  {i+1}. {l}" for i, l in enumerate(p.links[:80]))
             out += f"\n\nlinks ({len(p.links)}):\n{numbered}"
         return out
 
+    if name == "hjs_submit":
+        b = SESSION.get()
+        data = args.get("data")
+        jb = args.get("json")
+        if not data and jb is None:
+            data = {"body": args.get("body", "")}
+        p = b.submit(args["url"], data=data or None, json_body=jb)
+        SESSION.set_page(p)
+        return _fmt_page(p)
+
     if name == "hjs_extract":
         url = args.get("url")
         if url:
             p = SESSION.get().goto(url)
-            SESSION.page = p
+            SESSION.set_page(p)
         else:
             p = SESSION.page
             if p is None:
@@ -270,15 +399,14 @@ def call_tool(name: str, args: dict) -> str:
             if target is None:
                 return f"no link matching {needle!r}"
         np = SESSION.get().goto(target)
-        SESSION.page = np
-        SESSION.history.append(np.url)
+        SESSION.set_page(np)
         return _fmt_page(np)
 
     if name == "hjs_wait_for":
         page = SESSION.get().wait_for(
             args["url"], args.get("text", ""),
             status=args.get("status"), timeout=args.get("timeout", 20))
-        SESSION.page = page
+        SESSION.set_page(page)
         return _fmt_page(page)
 
     if name == "hjs_scrape":
@@ -318,7 +446,81 @@ def call_tool(name: str, args: dict) -> str:
                 f"visited={len(SESSION.history)} pages\n"
                 f"cookies_in_jar={n_cookies}")
 
+    # -- tplugin-backed tools (need the rendering plugin) --------------------
+    if _HAVE_TPLUGIN and name in ("hjs_screenshot", "hjs_pdf", "hjs_print",
+                                  "hjs_reader", "hjs_scroll", "hjs_tap"):
+        return _call_tplugin(name, args)
+
     raise ValueError(f"unknown tool: {name}")
+
+
+def _resolve_page(args: dict):
+    url = args.get("url")
+    if url:
+        p = SESSION.get().goto(url)
+        SESSION.set_page(p)
+    else:
+        p = SESSION.page
+    if p is None:
+        raise HJSError("no current page; call hjs_goto first")
+    return p
+
+
+def _call_tplugin(name: str, args: dict) -> str:
+    if name == "hjs_screenshot":
+        p = _resolve_page(args)
+        data = tp.screenshot(p)
+        path = args.get("path") or "/tmp/hjs-shot.png"
+        with open(path, "wb") as f:
+            f.write(data)
+        return f"wrote {len(data)} bytes to {path}"
+
+    if name == "hjs_pdf":
+        p = _resolve_page(args)
+        data = tp.pdf(p)
+        path = args.get("path") or "/tmp/hjs-page.pdf"
+        with open(path, "wb") as f:
+            f.write(data)
+        return f"wrote {len(data)} bytes to {path}"
+
+    if name == "hjs_print":
+        p = _resolve_page(args)
+        return tp.print_(p)
+
+    if name == "hjs_reader":
+        p = _resolve_page(args)
+        return tp.reader(p)
+
+    if name == "hjs_scroll":
+        if SESSION.viewer is None:
+            SESSION.refresh_viewer()
+        if SESSION.viewer is None:
+            return "no current page; call hjs_goto first"
+        v = SESSION.viewer
+        if args.get("to") is not None:
+            visible = v.scroll_to_fraction(float(args["to"]))
+        else:
+            visible = v.scroll(int(args.get("delta", 5)))
+        return "\n".join(f"  [{i}] {ln}" for i, ln in enumerate(visible))
+
+    if name == "hjs_tap":
+        if SESSION.viewer is None:
+            SESSION.refresh_viewer()
+        if SESSION.viewer is None:
+            return "no current page; call hjs_goto first"
+        v = SESSION.viewer
+        target = None
+        if args.get("text"):
+            target = v.tap_text(args["text"])
+        elif args.get("y") is not None:
+            target = v.tap_visible(int(args["y"]))
+        if not target:
+            return "no link at that spot (check hjs_scroll to see link rows)"
+        np = SESSION.get().goto(target)
+        SESSION.set_page(np)
+        return _fmt_page(np)
+
+    raise ValueError(f"unknown tplugin tool: {name}")
 
 
 # ---------------------------------------------------------------------------
@@ -385,17 +587,23 @@ def self_test() -> int:
             "name": "hjs_extract", "arguments": {}}},
         {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {
             "name": "hjs_session", "arguments": {"action": "info"}}},
+        {"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {
+            "name": "hjs_screenshot", "arguments": {"path": "/tmp/_hjs_selftest.png"}}},
+        {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {
+            "name": "hjs_pdf", "arguments": {"path": "/tmp/_hjs_selftest.pdf"}}},
     ]
     stdin = "\n".join(json.dumps(c) for c in cases) + "\n"
     proc = subprocess.run([sys.executable, __file__], input=stdin,
                           capture_output=True, text=True, timeout=120)
     ok = True
+    n_expected = len(tool_defs())
+    seen_pdf = seen_png = False
     for line in proc.stdout.splitlines():
         msg = json.loads(line)
         if msg.get("id") == 2:
             n = len(msg["result"]["tools"])
             print(f"tools/list -> {n} tools")
-            ok = ok and n == 10
+            ok = ok and n == n_expected
         if msg.get("id") == 3:
             text = msg["result"]["content"][0]["text"]
             print("hjs_goto ->", text.splitlines()[0] if text else "EMPTY")
@@ -404,8 +612,14 @@ def self_test() -> int:
             d = json.loads(msg["result"]["content"][0]["text"])
             print("hjs_extract -> title:", d.get("title"))
             ok = ok and bool(d.get("title"))
-    if proc.stderr.strip():
-        print("stderr:", proc.stderr[:200])
+        if msg.get("id") == 6:
+            seen_png = os.path.exists("/tmp/_hjs_selftest.png")
+            print("hjs_screenshot ->", "wrote file" if seen_png else "MISSING")
+            ok = ok and seen_png
+        if msg.get("id") == 7:
+            seen_pdf = os.path.exists("/tmp/_hjs_selftest.pdf")
+            print("hjs_pdf ->", "wrote file" if seen_pdf else "MISSING")
+            ok = ok and seen_pdf
     print("SELF-TEST", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 

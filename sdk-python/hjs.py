@@ -482,10 +482,16 @@ class Browser:
             return ""
 
     def _argv(self, url: str, mode: str, referer: Optional[str],
-              extra_headers: Optional[dict[str, str]]) -> list[str]:
+              extra_headers: Optional[dict[str, str]],
+              method: Optional[str] = None,
+              body: Optional[str] = None) -> list[str]:
         prof = self._next_profile()
         args = [self.binary, url, f"--timeout={self.timeout}",
                 f"--max={self.max_bytes}", f"--mode={mode}", "--links"]
+        if method:
+            args.append(f"--method={method}")
+        if body is not None:
+            args.append(f"--body={body}")
         if prof:
             args.append(f"--profile={prof}")
         if self.cookie_jar:
@@ -533,16 +539,20 @@ class Browser:
         mode: str = "json",
         referer: Optional[str] = None,
         headers: Optional[dict[str, str]] = None,
+        method: Optional[str] = None,
+        body: Optional[str] = None,
     ) -> Page | str:
         """Fetch a URL. Returns a Page (mode=json) or raw HTML string
-        (mode=html). Referer defaults to the previous page in-session."""
+        (mode=html). Referer defaults to the previous page in-session.
+        Pass method/body for non-GET requests (forms, JSON APIs); see also
+        submit()."""
         if self._closed:
             raise HJSError("browser session is closed")
         if self.max_pages and self._count >= self.max_pages:
             raise HJSError("max_pages reached for this session")
         self._check_robots(url)
         self._rate_limit(url)
-        argv = self._argv(url, mode, referer, headers)
+        argv = self._argv(url, mode, referer, headers, method, body)
         if self._recorder:
             self._recorder._record(argv, mode)
         proc = subprocess.run(
@@ -559,6 +569,40 @@ class Browser:
         page = Page(data, self)
         self._last_url = url
         return page
+
+    def submit(
+        self,
+        url: str,
+        data: Optional[dict[str, str]] = None,
+        *,
+        json_body: Optional[Any] = None,
+        method: str = "POST",
+        referer: Optional[str] = None,
+        headers: Optional[dict[str, str]] = None,
+    ) -> Page | str:
+        """Send a form or JSON request and return the response page. This is
+        the no-JS alternative to filling a Playwright form: url-encoded form
+        fields in ``data``, or a JSON document in ``json_body``. Cookies and
+        the referer chain carry over, so this works mid-session (login pages,
+        search posts, API backends)."""
+        body: Optional[str]
+        content_type: Optional[str]
+        if json_body is not None:
+            body = json.dumps(json_body, ensure_ascii=False)
+            content_type = "application/json"
+        elif data is not None:
+            body = urllib.parse.urlencode(data)
+            content_type = "application/x-www-form-urlencoded"
+        else:
+            body = None
+            content_type = None
+        hdrs = dict(headers or {})
+        if content_type:
+            hdrs.setdefault("Content-Type", content_type)
+        if referer is None and self._last_url:
+            referer = self._last_url
+        return self.goto(url, method=method, body=body, headers=hdrs,
+                         referer=referer)
 
     def wait_for(
         self,
@@ -705,15 +749,21 @@ class Recorder:
     def __init__(self, browser: "Browser", lang: str = "python"):
         self.browser = browser
         self.lang = lang
-        self._calls: list[tuple[str, str]] = []
+        self._calls: list[dict[str, Any]] = []
 
     def _record(self, argv: list[str], mode: str):
         url = argv[1] if len(argv) > 1 else ""
-        self._calls.append((url, mode))
+        entry: dict[str, Any] = {"url": url, "mode": mode}
+        for tok in argv[2:]:
+            if tok.startswith("--method="):
+                entry["method"] = tok[len("--method="):]
+            elif tok.startswith("--body="):
+                entry["body"] = tok[len("--body="):]
+        self._calls.append(entry)
 
     @property
     def calls(self) -> list[tuple[str, str]]:
-        return list(self._calls)
+        return [(c["url"], c["mode"]) for c in self._calls]
 
     def code(self) -> str:
         if self.lang == "python":
@@ -734,12 +784,21 @@ class Recorder:
         for k, v in o.items():
             head += f"    {k}={v!r},\n"
         head += ")\ntry:\n"
-        body = "".join(
-            f"    page = b.goto({url!r})\n    print(page.status, page.title)\n"
-            if mode == "json"
-            else f"    html = b.goto({url!r}, mode='html')\n"
-            for url, mode in self._calls
-        ) or "    pass  # no requests recorded\n"
+        body = ""
+        for c in self._calls:
+            if c.get("method"):
+                body += f"    page = b.goto({c['url']!r}"
+                if c.get("body") is not None:
+                    body += f", body={c['body']!r}"
+                body += f", method={c['method']!r})\n"
+                body += "    print(page.status, page.title)\n"
+            elif c["mode"] == "json":
+                body += f"    page = b.goto({c['url']!r})\n"
+                body += "    print(page.status, page.title)\n"
+            else:
+                body += f"    html = b.goto({c['url']!r}, mode='html')\n"
+        if not self._calls:
+            body = "    pass  # no requests recorded\n"
         return head + body + "finally:\n    b.close()\n"
 
     def _python_opts(self) -> dict[str, Any]:
@@ -777,8 +836,16 @@ class Recorder:
             "\t}",
             "\tdefer b.Close()",
         ]
-        for url, mode in self._calls:
-            if mode == "json":
+        for c in self._calls:
+            url = c["url"]
+            if c.get("method"):
+                lines.append(f"\tp, err := b.Submit({json.dumps(url)}, "
+                             f"map[string]string{{\"body\": {json.dumps(c.get('body') or '')}}}, nil, nil)")
+                lines.append("\tif err != nil {")
+                lines.append("\t\tlog.Fatal(err)")
+                lines.append("\t}")
+                lines.append("\tfmt.Println(p.Status, p.Title)")
+            elif c["mode"] == "json":
                 lines.append(f"\tp, err := b.Goto({json.dumps(url)}, nil)")
                 lines.append("\tif err != nil {")
                 lines.append("\t\tlog.Fatal(err)")

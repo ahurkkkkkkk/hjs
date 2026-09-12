@@ -59,6 +59,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ahurkkkkkkk/hjs/sdk-go/tplugin"
 )
 
 const defaultLD = "/root/hjs:/root/hbrowser/mojo-home/lib"
@@ -113,6 +115,31 @@ func (p *Page) Structured() *Structured {
 	return s
 }
 
+// --- tplugin.Page interface adapter -------------------------------------
+// These five methods let a *hjs.Page be handed to the sibling tplugin package
+// (screenshots, PDF, touch/scroll) without wrapping or copying.
+
+// GetURL implements tplugin.Page.
+func (p *Page) GetURL() string { return p.URL }
+
+// GetTitle implements tplugin.Page.
+func (p *Page) GetTitle() string { return p.Title }
+
+// GetText implements tplugin.Page.
+func (p *Page) GetText() string { return p.Text }
+
+// GetLinks implements tplugin.Page.
+func (p *Page) GetLinks() []string { return p.Links }
+
+// GetAnchors implements tplugin.Page. Safe for pages without a live browser
+// (returns nil rather than fetching).
+func (p *Page) GetAnchors() []Link {
+	if p.raw == "" && p.browser == nil {
+		return nil
+	}
+	return p.Structured().Links
+}
+
 // FindLinks filters resolved links by substring and/or regex.
 func (p *Page) FindLinks(contains, pattern string) []string {
 	var rx *regexp.Regexp
@@ -144,11 +171,9 @@ type Structured struct {
 	Links       []Link            `json:"links"`
 }
 
-// Link is an anchor with href and text.
-type Link struct {
-	Href string `json:"href"`
-	Text string `json:"text"`
-}
+// Link is an anchor with href and text. It aliases the tplugin type so
+// *Page satisfies tplugin.Page without any conversion layer.
+type Link = tplugin.Link
 
 var (
 	attrRe  = regexp.MustCompile(`([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*"([^"]*)"|([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*'([^']*)'|([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*([^\s"'>]+)`)
@@ -446,7 +471,7 @@ func (b *Browser) guardCount() error {
 	return nil
 }
 
-func (b *Browser) argv(target, mode string, referer *string, hdrs map[string]string) []string {
+func (b *Browser) argv(target, mode string, referer *string, hdrs map[string]string, method, body string) []string {
 	o := b.opts
 	prof := b.nextProfile()
 	args := []string{b.binPath, target,
@@ -454,6 +479,12 @@ func (b *Browser) argv(target, mode string, referer *string, hdrs map[string]str
 		fmt.Sprintf("--max=%d", o.MaxBytes),
 		"--mode=" + mode,
 		"--links",
+	}
+	if method != "" {
+		args = append(args, "--method="+method)
+	}
+	if body != "" {
+		args = append(args, "--body="+body)
 	}
 	if prof != "" {
 		args = append(args, "--profile="+prof)
@@ -535,7 +566,7 @@ func (b *Browser) rawGet(target string, referer *string, hdrs map[string]string)
 	if b.rec != nil {
 		b.rec.record(target, "html")
 	}
-	out, err := b.run(b.argv(target, "html", referer, hdrs))
+	out, err := b.run(b.argv(target, "html", referer, hdrs, "", ""))
 	if err != nil {
 		return "", err
 	}
@@ -548,6 +579,60 @@ func (b *Browser) rawGet(target string, referer *string, hdrs map[string]string)
 
 // Goto fetches a URL with JSON extraction.
 func (b *Browser) Goto(target string, hdrs map[string]string) (*Page, error) {
+	return b.gotoWith(target, hdrs, "", "")
+}
+
+// Submit sends a form or JSON request and returns the response page. This is
+// the no-JS analogue of filling a Playwright form: pass form fields or a JSON
+// body, and cookies plus the referer chain carry over so it works mid-session.
+// data is url-encoded; if jsonBody is non-nil it is sent as JSON instead
+// (exactly one of data / jsonBody should be set). content-type is set for you.
+func (b *Browser) Submit(target string, data map[string]string, jsonBody any, hdrs map[string]string) (*Page, error) {
+	body, ctype, err := encodeBody(data, jsonBody)
+	if err != nil {
+		return nil, err
+	}
+	all := map[string]string{}
+	for k, v := range hdrs {
+		all[k] = v
+	}
+	if ctype != "" {
+		if _, ok := all["Content-Type"]; !ok {
+			all["Content-Type"] = ctype
+		}
+	}
+	referer := b.opts.Referer
+	b.mu.Lock()
+	if referer == "" && b.lastURL != "" {
+		referer = b.lastURL
+	}
+	b.mu.Unlock()
+	if referer != "" {
+		return b.gotoReferer(target, referer, body, "POST", all)
+	}
+	return b.gotoWith(target, all, "POST", body)
+}
+
+// encodeBody renders data/jsonBody into a request body + content type.
+func encodeBody(data map[string]string, jsonBody any) (string, string, error) {
+	if jsonBody != nil {
+		b, err := json.Marshal(jsonBody)
+		if err != nil {
+			return "", "", err
+		}
+		return string(b), "application/json", nil
+	}
+	if len(data) > 0 {
+		vals := url.Values{}
+		for k, v := range data {
+			vals.Set(k, v)
+		}
+		return vals.Encode(), "application/x-www-form-urlencoded", nil
+	}
+	return "", "", nil
+}
+
+func (b *Browser) gotoWith(target string, hdrs map[string]string, method, body string) (*Page, error) {
 	if err := b.guardCount(); err != nil {
 		return nil, err
 	}
@@ -556,12 +641,33 @@ func (b *Browser) Goto(target string, hdrs map[string]string) (*Page, error) {
 	}
 	b.rateLimit(target)
 	if b.rec != nil {
-		b.rec.record(target, "json")
+		b.rec.recordFull(target, "json", method, body)
 	}
-	out, err := b.run(b.argv(target, "json", nil, hdrs))
+	out, err := b.run(b.argv(target, "json", nil, hdrs, method, body))
 	if err != nil {
 		return nil, err
 	}
+	return b.newPage(out)
+}
+
+func (b *Browser) gotoReferer(target, referer, body, method string, hdrs map[string]string) (*Page, error) {
+	if err := b.guardCount(); err != nil {
+		return nil, err
+	}
+	b.rateLimit(target)
+	if b.rec != nil {
+		b.rec.recordFull(target, "json", method, body)
+	}
+	r := referer
+	out, err := b.run(b.argv(target, "json", &r, hdrs, method, body))
+	if err != nil {
+		return nil, err
+	}
+	return b.newPage(out)
+}
+
+// newPage parses an hjs JSON response into a Page and books session state.
+func (b *Browser) newPage(out []byte) (*Page, error) {
 	var p Page
 	if err := json.Unmarshal(out, &p); err != nil {
 		return nil, fmt.Errorf("hjs: bad json: %w", err)
@@ -570,7 +676,7 @@ func (b *Browser) Goto(target string, hdrs map[string]string) (*Page, error) {
 	p.resolveLinks()
 	b.mu.Lock()
 	b.count++
-	b.lastURL = target
+	b.lastURL = p.URL
 	b.mu.Unlock()
 	return &p, nil
 }
@@ -600,26 +706,7 @@ func (p *Page) resolveLinks() {
 
 // GotoReferer fetches with an explicit Referer override.
 func (b *Browser) GotoReferer(target, referer string, hdrs map[string]string) (*Page, error) {
-	if err := b.guardCount(); err != nil {
-		return nil, err
-	}
-	b.rateLimit(target)
-	r := referer
-	out, err := b.run(b.argv(target, "json", &r, hdrs))
-	if err != nil {
-		return nil, err
-	}
-	var p Page
-	if err := json.Unmarshal(out, &p); err != nil {
-		return nil, fmt.Errorf("hjs: bad json: %w", err)
-	}
-	p.browser = b
-	p.resolveLinks()
-	b.mu.Lock()
-	b.count++
-	b.lastURL = target
-	b.mu.Unlock()
-	return &p, nil
+	return b.gotoReferer(target, referer, "", "", hdrs)
 }
 
 // GotoHTML fetches and returns the raw HTML source.
@@ -899,17 +986,28 @@ func (b *Browser) BinaryDir() string { return filepath.Dir(b.binPath) }
 // Recorder
 // ---------------------------------------------------------------------------
 
-// Recorder captures Goto calls and emits a runnable script (codegen).
+// Recorder captures Goto/Submit calls and emits a runnable script (codegen).
 type Recorder struct {
 	browser *Browser
 	lang    string
 	mu      sync.Mutex
-	calls   [][2]string
+	calls   []recCall
+}
+
+type recCall struct {
+	url    string
+	mode   string
+	method string
+	body   string
 }
 
 func (r *Recorder) record(url, mode string) {
+	r.recordFull(url, mode, "", "")
+}
+
+func (r *Recorder) recordFull(url, mode, method, body string) {
 	r.mu.Lock()
-	r.calls = append(r.calls, [2]string{url, mode})
+	r.calls = append(r.calls, recCall{url, mode, method, body})
 	r.mu.Unlock()
 }
 
@@ -918,7 +1016,9 @@ func (r *Recorder) Calls() [][2]string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([][2]string, len(r.calls))
-	copy(out, r.calls)
+	for i, c := range r.calls {
+		out[i] = [2]string{c.url, c.mode}
+	}
 	return out
 }
 
@@ -943,10 +1043,17 @@ func (r *Recorder) python() string {
 		s += "    pass  # no requests recorded\n"
 	}
 	for _, c := range r.calls {
-		if c[1] == "json" {
-			s += fmt.Sprintf("    page = b.goto(%q)\n    print(page.status, page.title)\n", c[0])
-		} else {
-			s += fmt.Sprintf("    html = b.goto(%q, mode='html')\n", c[0])
+		switch {
+		case c.method != "":
+			s += fmt.Sprintf("    page = b.submit(%q, method=%q", c.url, c.method)
+			if c.body != "" {
+				s += fmt.Sprintf(", body=%q", c.body)
+			}
+			s += ")\n    print(page.status, page.title)\n"
+		case c.mode == "json":
+			s += fmt.Sprintf("    page = b.goto(%q)\n    print(page.status, page.title)\n", c.url)
+		default:
+			s += fmt.Sprintf("    html = b.goto(%q, mode='html')\n", c.url)
 		}
 	}
 	s += "finally:\n    b.close()\n"
@@ -964,10 +1071,14 @@ func (r *Recorder) golang() string {
 	}
 	s += "\tb, err := hjs.New(opts)\n\tif err != nil {\n\t\tlog.Fatal(err)\n\t}\n\tdefer b.Close()\n"
 	for _, c := range r.calls {
-		if c[1] == "json" {
-			s += fmt.Sprintf("\tp, err := b.Goto(%q, nil)\n\tif err != nil {\n\t\tlog.Fatal(err)\n\t}\n\tfmt.Println(p.Status, p.Title)\n", c[0])
-		} else {
-			s += fmt.Sprintf("\traw, err := b.GotoHTML(%q, nil)\n\tif err != nil {\n\t\tlog.Fatal(err)\n\t}\n\t_ = raw\n", c[0])
+		switch {
+		case c.method != "":
+			s += fmt.Sprintf("\tp, err := b.Submit(%q, map[string]string{\"body\": %q}, nil, nil)\n", c.url, c.body)
+			s += "\tif err != nil {\n\t\tlog.Fatal(err)\n\t}\n\tfmt.Println(p.Status, p.Title)\n"
+		case c.mode == "json":
+			s += fmt.Sprintf("\tp, err := b.Goto(%q, nil)\n\tif err != nil {\n\t\tlog.Fatal(err)\n\t}\n\tfmt.Println(p.Status, p.Title)\n", c.url)
+		default:
+			s += fmt.Sprintf("\traw, err := b.GotoHTML(%q, nil)\n\tif err != nil {\n\t\tlog.Fatal(err)\n\t}\n\t_ = raw\n", c.url)
 		}
 	}
 	s += "}\n"

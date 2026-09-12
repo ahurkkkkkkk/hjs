@@ -24,6 +24,26 @@ def check(name, cond, detail=""):
 
 
 class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        if self.path.startswith("/post"):
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            raw = self.rfile.read(length).decode("utf-8", "replace")
+            ct = self.headers.get("Content-Type", "")
+            if "json" in ct:
+                echo = f"posted={raw}"
+            else:
+                import urllib.parse as up
+                d = dict(up.parse_qsl(raw))
+                echo = f"posted={d.get('greeting','')}|{d.get('name','')}"
+            body = f"<html><title>Posted</title><body>{echo}</body></html>".encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_error(405)
+
     def do_GET(self):
         if self.path.startswith("/setcookie"):
             body = b"<html><title>Cookie Set</title><body>done</body></html>"
@@ -181,6 +201,21 @@ print("== parse_html standalone ==")
 d = parse_html('<html><head><title>T</title></head><body>x <a href="/y">Link</a></body></html>')
 check("standalone title", d["title"] == "T")
 check("standalone link", d["links"][0]["href"] == "/y")
+
+print("== submit: forms + json + referer chain ==")
+with Browser(js=False) as b:
+    p = b.submit(f"{BASE}/post", data={"greeting": "hello", "name": "world"})
+    check("urlencoded form post", "posted=hello|world" in p.text, p.text[:120])
+    b.goto(f"{BASE}/")  # set last-url so submit chains a referer
+    p2 = b.submit(f"{BASE}/post", json_body={"a": 1})
+    check("json body post", '"a": 1' in p2.text or '"a":1' in p2.text, p2.text[:120])
+
+print("== recorder captures submit ==")
+with Browser(profile="chrome131", js=False) as b:
+    rec = b.record("python")
+    b.submit(f"{BASE}/post", data={"x": "1"})
+    code = rec.code()
+    check("codegen shows method arg", "method=" in code and "/post" in code, code[:160])
 
 print("== recorder / codegen ==")
 with Browser(profile="chrome131", js=False) as b:

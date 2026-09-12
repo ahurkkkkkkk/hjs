@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.0
+
+* hjs-tplugin: a pure-stdlib rendering plugin for both SDKs. Hand-written PNG
+  encoder, PDF writer, and 5x7 bitmap font (no Pillow, reportlab,
+  wkhtmltopdf, or Chromium). Adds screenshot (content snapshot), pdf,
+  print_/PrintText, reader, and a Viewer with scroll + tap link hit-testing.
+* Go SDK tplugin package; `*hjs.Page` satisfies `tplugin.Page` directly
+  (Link is a shared alias, no conversion layer).
+* Forms and login: `submit()` in both SDKs, urlencoded or JSON, session
+  cookies and referer carried. New engine flags `--method` and `--body`;
+  `CURLOPT_COPYPOSTFIELDS` fixes request bodies being read after free.
+* MCP server now exposes 17 tools (adds hjs_submit, hjs_screenshot, hjs_pdf,
+  hjs_print, hjs_reader, hjs_scroll, hjs_tap). Self-test verifies the PNG and
+  PDF actually land on disk.
+* Benchmarks section + scaling chart: 19 MB / ~50 fetches/s at 1 worker up to
+  118 MB / ~205 fetches/s at 8 workers, measured on a local test server.
+
 ## 0.3.0
 
 * Python and Go SDKs with a Playwright-style API: `Browser`, `Page`,

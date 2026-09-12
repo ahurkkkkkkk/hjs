@@ -49,6 +49,7 @@ comptime CURLOPT_MAXREDIRS = c_int(68)
 comptime CURLOPT_NOSIGNAL = c_int(99)
 comptime CURLOPT_CUSTOMREQUEST = c_int(10036)
 comptime CURLOPT_POSTFIELDS = c_int(10015)
+comptime CURLOPT_COPYPOSTFIELDS = c_int(10165)
 
 comptime CURLOPT_COOKIE = c_int(10022)
 comptime CURLOPT_COOKIEFILE = c_int(10031)
@@ -470,7 +471,7 @@ def fetch_url(
     if method != "GET":
         curl.setopt_str(easy, CURLOPT_CUSTOMREQUEST, method)
     if body.byte_length() > 0:
-        curl.setopt_str(easy, CURLOPT_POSTFIELDS, body)
+        curl.setopt_str(easy, CURLOPT_COPYPOSTFIELDS, body)
 
     var have_headers = False
     var header_addr = Int(0)
@@ -649,6 +650,8 @@ def print_help():
     print("  --backoff-ms=N          Base backoff between retries (default 500)")
     print("  --links                 Include extracted links (json mode)")
     print("  --no-meta               Omit title/description (json mode)")
+    print("  --method=GET|POST|...   HTTP verb for the request")
+    print("  --body=DATA             Request body (with --method=POST etc.)")
     print("  --quiet                 Suppress the trailing newline")
     print("  --help                  Show this help")
 
@@ -670,6 +673,8 @@ def main() raises:
     var want_links = False
     var want_meta = True
     var quiet = False
+    var http_method = String("GET")
+    var post_body = String("")
 
     # Stealth knobs
     var profile = String("")
@@ -732,6 +737,10 @@ def main() raises:
             retries = Int(a.removeprefix("--retries="))
         elif a.startswith("--backoff-ms="):
             backoff_ms = Int(a.removeprefix("--backoff-ms="))
+        elif a.startswith("--method="):
+            http_method = String(a.removeprefix("--method="))
+        elif a.startswith("--body="):
+            post_body = String(a.removeprefix("--body="))
         elif a.startswith("--"):
             pass
         elif url.byte_length() == 0:
@@ -774,7 +783,7 @@ def main() raises:
     while True:
         var fetched = fetch_url(
             curl, url, timeout_sec, max_bytes, user_agent,
-            String("GET"), String(""), cfg
+            http_method, post_body, cfg
         )
         status = fetched.status
         html = fetched.body
